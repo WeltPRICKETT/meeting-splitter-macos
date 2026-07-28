@@ -111,6 +111,7 @@ enum MeetingSplitterError: LocalizedError, Sendable {
     case invalidBitrate
     case ffmpegUnavailable
     case ffmpegFailed(String)
+    case imageExportFailed
     case noFramesDetected
     case outputNotWritable
     case cancelled
@@ -131,6 +132,8 @@ enum MeetingSplitterError: LocalizedError, Sendable {
             "应用缺少媒体转换组件"
         case .ffmpegFailed:
             "媒体转换没有完成"
+        case .imageExportFailed:
+            "PPT 页面导出没有完成"
         case .noFramesDetected:
             "没有识别到稳定的 PPT 页面"
         case .outputNotWritable:
@@ -154,6 +157,8 @@ enum MeetingSplitterError: LocalizedError, Sendable {
             "请重新运行打包脚本，或确认本机已安装 FFmpeg。"
         case .ffmpegFailed(let detail):
             detail.isEmpty ? "请换一个视频重试。" : detail
+        case .imageExportFailed:
+            "请确认视频没有损坏，并预留足够的磁盘空间后重试。"
         case .noFramesDetected:
             "把识别方式切换为“更少漏页”后重试。"
         case .outputNotWritable:

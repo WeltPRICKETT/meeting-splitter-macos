@@ -70,7 +70,9 @@ actor MeetingMediaEngine {
             }
         }
 
-        let runner = FFmpegRunner(executableURL: ffmpegURL)
+        let audioRunner = FFmpegRunner(executableURL: ffmpegURL)
+        let candidateRunner = FFmpegRunner(executableURL: ffmpegURL)
+        var imageExporter: SlideImageExporter?
         let baseName = OutputPathBuilder.safeBaseName(for: request.inputVideo)
         let audioFileName = "\(baseName)_\(request.options.audioBitrateKbps)kbps.mp3"
         let temporaryAudioURL = temporaryDirectory.appendingPathComponent(audioFileName)
@@ -79,83 +81,28 @@ actor MeetingMediaEngine {
             await progress(
                 .init(
                     stage: .extractingAudio,
-                    fraction: 0.05,
-                    detail: "\(request.options.audioBitrateKbps) kbps"
+                    fraction: 0.03,
+                    detail: "\(request.options.audioBitrateKbps) kbps，与页面识别同时进行"
                 )
             )
 
-            try await runner.run(
-                arguments: [
-                    "-hide_banner",
-                    "-y",
-                    "-i", request.inputVideo.path,
-                    "-map", "0:a:0",
-                    "-vn",
-                    "-c:a", "libmp3lame",
-                    "-b:a", "\(request.options.audioBitrateKbps)k",
-                    "-progress", "pipe:1",
-                    "-nostats",
-                    temporaryAudioURL.path
-                ],
-                expectedDuration: duration
-            ) { value in
-                Task {
-                    await progress(
-                        .init(
-                            stage: .extractingAudio,
-                            fraction: 0.05 + value * 0.3
-                        )
-                    )
-                }
-            }
+            async let audioExport: Void = Self.extractAudio(
+                runner: audioRunner,
+                inputVideo: request.inputVideo,
+                outputURL: temporaryAudioURL,
+                bitrateKbps: request.options.audioBitrateKbps,
+                duration: duration
+            )
+            async let slideDetection: [DetectedSlide] = Self.detectSlides(
+                runner: candidateRunner,
+                inputVideo: request.inputVideo,
+                candidatesDirectory: candidatesDirectory,
+                duration: duration,
+                sensitivity: request.options.sensitivity,
+                progress: progress
+            )
 
-            try Task.checkCancellation()
-            await progress(.init(stage: .detectingSlides, fraction: 0.36))
-
-            let candidatePattern = candidatesDirectory
-                .appendingPathComponent("frame_%06d.jpg")
-                .path
-
-            try await runner.run(
-                arguments: [
-                    "-hide_banner",
-                    "-y",
-                    "-i", request.inputVideo.path,
-                    "-map", "0:v:0",
-                    "-an",
-                    "-vf", "fps=1,scale=480:-2:flags=lanczos",
-                    "-q:v", "5",
-                    "-progress", "pipe:1",
-                    "-nostats",
-                    candidatePattern
-                ],
-                expectedDuration: duration
-            ) { value in
-                Task {
-                    await progress(
-                        .init(
-                            stage: .detectingSlides,
-                            fraction: 0.36 + value * 0.24,
-                            detail: "正在快速浏览录屏"
-                        )
-                    )
-                }
-            }
-
-            let detectedSlides = try SlideDetector().detect(
-                in: candidatesDirectory,
-                sensitivity: request.options.sensitivity
-            ) { value in
-                Task {
-                    await progress(
-                        .init(
-                            stage: .detectingSlides,
-                            fraction: 0.60 + value * 0.15,
-                            detail: "正在合并重复画面"
-                        )
-                    )
-                }
-            }
+            let (detectedSlides, _) = try await (slideDetection, audioExport)
 
             guard !detectedSlides.isEmpty else {
                 throw MeetingSplitterError.noFramesDetected
@@ -169,52 +116,26 @@ actor MeetingMediaEngine {
                 )
             )
 
-            for (index, slide) in detectedSlides.enumerated() {
-                try Task.checkCancellation()
-
-                let imageName = String(
-                    format: "第%03d页_%@.%@",
-                    index + 1,
-                    TimestampFormatter.fileNameComponent(
-                        seconds: slide.sourceTimestamp
-                    ),
-                    request.options.imageFormat.fileExtension
-                )
-                let imageURL = slidesDirectory.appendingPathComponent(imageName)
-
-                var arguments = [
-                    "-hide_banner",
-                    "-y",
-                    "-ss", String(format: "%.3f", slide.sourceTimestamp),
-                    "-i", request.inputVideo.path,
-                    "-map", "0:v:0",
-                    "-frames:v", "1",
-                    "-update", "1"
-                ]
-
-                switch request.options.imageFormat {
-                case .png:
-                    arguments += ["-compression_level", "4"]
-                case .jpeg:
-                    arguments += ["-q:v", "2"]
-                }
-
-                arguments += [
-                    "-progress", "pipe:1",
-                    "-nostats",
-                    imageURL.path
-                ]
-
-                try await runner.run(arguments: arguments)
-
-                let completed = Double(index + 1) / Double(detectedSlides.count)
-                await progress(
-                    .init(
-                        stage: .exportingSlides,
-                        fraction: 0.76 + completed * 0.20,
-                        detail: "已导出 \(index + 1) / \(detectedSlides.count) 页"
+            let exporter = SlideImageExporter(inputVideo: request.inputVideo)
+            imageExporter = exporter
+            try await exporter.export(
+                timestamps: detectedSlides.map(\.sourceTimestamp),
+                format: request.options.imageFormat,
+                to: slidesDirectory
+            ) { value in
+                Task {
+                    let completed = min(
+                        Int((value * Double(detectedSlides.count)).rounded()),
+                        detectedSlides.count
                     )
-                )
+                    await progress(
+                        .init(
+                            stage: .exportingSlides,
+                            fraction: 0.76 + value * 0.20,
+                            detail: "已导出 \(completed) / \(detectedSlides.count) 页"
+                        )
+                    )
+                }
             }
 
             await progress(.init(stage: .finalizing, fraction: 0.97))
@@ -245,7 +166,9 @@ actor MeetingMediaEngine {
                 warnings: warnings
             )
         } catch is CancellationError {
-            runner.terminate()
+            audioRunner.terminate()
+            candidateRunner.terminate()
+            imageExporter?.cancel()
             throw MeetingSplitterError.cancelled
         } catch let error as MeetingSplitterError {
             throw error
@@ -259,6 +182,175 @@ actor MeetingMediaEngine {
                 "请确认视频没有损坏，并预留足够的磁盘空间后重试。"
             )
         }
+    }
+
+    private static func extractAudio(
+        runner: FFmpegRunner,
+        inputVideo: URL,
+        outputURL: URL,
+        bitrateKbps: Int,
+        duration: Double
+    ) async throws {
+        try await runner.run(
+            arguments: [
+                "-hide_banner",
+                "-y",
+                "-i", inputVideo.path,
+                "-map", "0:a:0",
+                "-vn",
+                "-c:a", "libmp3lame",
+                "-b:a", "\(bitrateKbps)k",
+                "-progress", "pipe:1",
+                "-nostats",
+                outputURL.path
+            ],
+            expectedDuration: duration
+        )
+    }
+
+    private static func detectSlides(
+        runner: FFmpegRunner,
+        inputVideo: URL,
+        candidatesDirectory: URL,
+        duration: Double,
+        sensitivity: SlideDetectionSensitivity,
+        progress: @escaping @Sendable (ProcessingProgress) async -> Void
+    ) async throws -> [DetectedSlide] {
+        await progress(
+            .init(
+                stage: .detectingSlides,
+                fraction: 0.05,
+                detail: "正在快速扫描关键画面"
+            )
+        )
+
+        try await extractCandidates(
+            runner: runner,
+            inputVideo: inputVideo,
+            candidatesDirectory: candidatesDirectory,
+            duration: duration,
+            keyframesOnly: true
+        ) { value in
+            Task {
+                await progress(
+                    .init(
+                        stage: .detectingSlides,
+                        fraction: 0.05 + value * 0.20,
+                        detail: "正在快速扫描关键画面"
+                    )
+                )
+            }
+        }
+
+        var candidates = try CandidateFrame.imageURLs(in: candidatesDirectory)
+        let requiresFallback = CandidateSamplingPolicy.requiresDenseFallback(
+            keyframeTimestamps: candidates.map(CandidateFrame.timestamp(for:)),
+            duration: duration,
+            sensitivity: sensitivity
+        )
+
+        if requiresFallback {
+            await progress(
+                .init(
+                    stage: .detectingSlides,
+                    fraction: 0.25,
+                    detail: "关键画面较少，正在自动补扫以避免漏页"
+                )
+            )
+
+            for candidate in candidates {
+                try FileManager.default.removeItem(at: candidate)
+            }
+
+            try await extractCandidates(
+                runner: runner,
+                inputVideo: inputVideo,
+                candidatesDirectory: candidatesDirectory,
+                duration: duration,
+                keyframesOnly: false
+            ) { value in
+                Task {
+                    await progress(
+                        .init(
+                            stage: .detectingSlides,
+                            fraction: 0.25 + value * 0.25,
+                            detail: "正在自动补扫，避免漏掉短暂页面"
+                        )
+                    )
+                }
+            }
+            candidates = try CandidateFrame.imageURLs(in: candidatesDirectory)
+        }
+
+        guard !candidates.isEmpty else {
+            throw MeetingSplitterError.noFramesDetected
+        }
+
+        await progress(
+            .init(
+                stage: .detectingSlides,
+                fraction: 0.50,
+                detail: "正在合并重复画面"
+            )
+        )
+
+        return try SlideDetector().detect(
+            in: candidatesDirectory,
+            sensitivity: sensitivity
+        ) { value in
+            Task {
+                await progress(
+                    .init(
+                        stage: .detectingSlides,
+                        fraction: 0.50 + value * 0.24,
+                        detail: "正在合并重复画面"
+                    )
+                )
+            }
+        }
+    }
+
+    private static func extractCandidates(
+        runner: FFmpegRunner,
+        inputVideo: URL,
+        candidatesDirectory: URL,
+        duration: Double,
+        keyframesOnly: Bool,
+        onProgress: @escaping @Sendable (Double) -> Void
+    ) async throws {
+        let candidatePattern = candidatesDirectory
+            .appendingPathComponent("frame_%012d.jpg")
+            .path
+
+        var arguments = [
+            "-hide_banner",
+            "-y"
+        ]
+        if keyframesOnly {
+            arguments += ["-skip_frame", "nokey"]
+        }
+        arguments += [
+            "-i", inputVideo.path,
+            "-map", "0:v:0",
+            "-an",
+            "-vf",
+            keyframesOnly
+                ? "scale=480:-2:flags=fast_bilinear"
+                : "fps=1,scale=480:-2:flags=fast_bilinear",
+            "-fps_mode", "vfr",
+            "-enc_time_base", "1:1000",
+            "-frame_pts", "1",
+            "-q:v", "5",
+            "-progress", "pipe:1",
+            "-nostats",
+            candidatePattern
+        ]
+
+        try await runner.run(
+            arguments: arguments,
+            expectedDuration: duration,
+            onProgress: onProgress
+        )
     }
 
     private func validatedDuration(for inputVideo: URL) async throws -> Double {

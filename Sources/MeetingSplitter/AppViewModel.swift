@@ -161,7 +161,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func apply(_ update: ProcessingProgress) {
-        guard isProcessing else { return }
+        guard isProcessing, update.fraction >= progressFraction else { return }
         progressFraction = update.fraction
         statusText = update.stage.displayName
         statusDetail = update.detail

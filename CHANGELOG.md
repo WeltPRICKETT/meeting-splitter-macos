@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.0 - 2026-07-28
+
+- Scan video keyframes first and automatically fall back to one-second sampling
+  when keyframe gaps could hide presentation pages.
+- Use a lightweight grayscale signature before Vision, so unchanged frames no
+  longer pay the cost of a Vision feature-print request.
+- Extract MP3 audio and scan presentation pages concurrently.
+- Export all confirmed pages through one `AVAssetImageGenerator` batch instead
+  of starting a separate FFmpeg process for every page.
+- Preserve candidate timestamps at millisecond precision.
+- Keep progress monotonic while concurrent media work is running.
+- Reduce the measured end-to-end time for a synthetic 120-second, four-page,
+  720p recording from 3.44 seconds to 0.72 seconds on the development Mac.
+
 ## 0.1.0 - 2026-07-28
 
 This is a source release. It intentionally does not attach the locally built

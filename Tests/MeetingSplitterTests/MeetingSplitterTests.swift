@@ -61,12 +61,12 @@ struct MeetingSplitterTests {
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: root) }
 
-        try writeSlide(style: 0, to: root.appendingPathComponent("frame_000001.jpg"))
-        try writeSlide(style: 0, to: root.appendingPathComponent("frame_000002.jpg"))
-        try writeSlide(style: 1, to: root.appendingPathComponent("frame_000003.jpg"))
-        try writeSlide(style: 1, to: root.appendingPathComponent("frame_000004.jpg"))
-        try writeSlide(style: 2, to: root.appendingPathComponent("frame_000005.jpg"))
-        try writeSlide(style: 2, to: root.appendingPathComponent("frame_000006.jpg"))
+        try writeSlide(style: 0, to: root.appendingPathComponent("frame_000000000000.jpg"))
+        try writeSlide(style: 0, to: root.appendingPathComponent("frame_000000001000.jpg"))
+        try writeSlide(style: 1, to: root.appendingPathComponent("frame_000000002000.jpg"))
+        try writeSlide(style: 1, to: root.appendingPathComponent("frame_000000003000.jpg"))
+        try writeSlide(style: 2, to: root.appendingPathComponent("frame_000000004000.jpg"))
+        try writeSlide(style: 2, to: root.appendingPathComponent("frame_000000005000.jpg"))
 
         let slides = try SlideDetector().detect(
             in: root,
@@ -75,6 +75,37 @@ struct MeetingSplitterTests {
 
         #expect(slides.count == 3)
         #expect(slides.map(\.sourceTimestamp) == [0, 3, 5])
+    }
+
+    @Test
+    func candidateFilenamePreservesMillisecondTimestamp() {
+        let url = URL(fileURLWithPath: "/tmp/frame_000000002002.jpg")
+        #expect(CandidateFrame.timestamp(for: url) == 2.002)
+    }
+
+    @Test
+    func sparseKeyframesTriggerDenseFallback() {
+        #expect(
+            CandidateSamplingPolicy.requiresDenseFallback(
+                keyframeTimestamps: [0, 2, 4],
+                duration: 6,
+                sensitivity: .balanced
+            ) == false
+        )
+        #expect(
+            CandidateSamplingPolicy.requiresDenseFallback(
+                keyframeTimestamps: [0, 5, 10],
+                duration: 12,
+                sensitivity: .balanced
+            )
+        )
+        #expect(
+            CandidateSamplingPolicy.requiresDenseFallback(
+                keyframeTimestamps: [0, 2],
+                duration: 4,
+                sensitivity: .more
+            )
+        )
     }
 
     @Test
@@ -121,6 +152,7 @@ struct MeetingSplitterTests {
                 "-map", "3:a:0",
                 "-c:v", "mpeg4",
                 "-q:v", "3",
+                "-g", "180",
                 "-c:a", "aac",
                 "-shortest",
                 inputVideo.path
@@ -146,8 +178,18 @@ struct MeetingSplitterTests {
         let imageURLs = try fileManager.contentsOfDirectory(
             at: result.slidesDirectoryURL,
             includingPropertiesForKeys: nil
-        )
+        ).sorted { $0.lastPathComponent < $1.lastPathComponent }
         #expect(imageURLs.count == 3)
+        #expect(
+            imageURLs.map(\.lastPathComponent) == [
+                "第001页_00-00-00.png",
+                "第002页_00-00-03.png",
+                "第003页_00-00-05.png"
+            ]
+        )
+
+        let uniqueImages = try Set(imageURLs.map { try Data(contentsOf: $0) })
+        #expect(uniqueImages.count == 3)
 
         let audioSize = try result.audioURL.resourceValues(
             forKeys: [.fileSizeKey]
