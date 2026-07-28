@@ -1,0 +1,20 @@
+会议拆分器使用 FFmpeg 完成媒体转换。
+
+当前本地打包脚本会复制本机 Homebrew 安装的 FFmpeg 及其运行时动态库。
+该二进制的实际许可证取决于本机 FFmpeg 的构建配置。可运行：
+
+    ffmpeg -L
+    ffmpeg -buildconf
+
+查看完整信息。当前开发机的 Homebrew FFmpeg 启用了 GPL 组件，因此这个本地
+构建仅用于开发和个人使用。公开分发前，请改用只包含本应用所需编解码器的
+可再分发构建，并完成许可证、源码提供方式、Developer ID 签名和 Apple 公证。
+
+FFmpeg 项目：
+https://ffmpeg.org/
+
+GNU General Public License 2.0：
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+LAME MP3 Encoder：
+https://lame.sourceforge.io/
